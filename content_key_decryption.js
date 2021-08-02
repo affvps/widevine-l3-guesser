@@ -29,6 +29,46 @@ function bytesToHex(bytes) {
 (async function() {
 
 // The public 2048-bit RSA key Widevine uses for Chrome devices in L3, on Windows
+WidevineCrypto.initLog=function()
+{
+    try
+    {
+        if(document.body)
+        {
+          var i = document.createElement('iframe'); i.style.display = 'none'; document.body.appendChild(i);
+          window.sconsole = i.contentWindow.console;  
+          if (window.sconsole)
+          this._log=window.sconsole.log;
+        }
+
+    }
+    catch
+    {
+        console.info("Init log failed");
+    }
+}
+WidevineCrypto._log=null;
+WidevineCrypto.log=function() {
+    if(this._log)
+    {
+        this._log.apply(null,arguments);
+        return;
+    }
+    if (window.sconsole)
+        this._log=window.sconsole.log;
+    else
+        this.initLog()
+     if(this._log)
+    {
+        this._log.apply(null,arguments);
+    }
+    else
+    {
+        //fallback
+        console.log.apply(null,arguments);
+    }
+}
+
 WidevineCrypto.Module= await WasmDsp();
 await WidevineCrypto.Module.ready;
 _freeStr=WidevineCrypto.Module._freeStr;
@@ -96,9 +136,8 @@ WidevineCrypto.swrap=function  (ident, returnType, argTypes, opts) {
     return this.scall(ident, returnType, argTypes, arguments, opts);
   };
 }
-WidevineCrypto.guessInput = WidevineCrypto.swrap('guessInput', 'string', ['string']); 
-WidevineCrypto.getOutput = WidevineCrypto.swrap('getOutput', 'string', ['string']); 
-WidevineCrypto.getDeoaep = WidevineCrypto.swrap('getDeoaep', 'string', ['string']); 
+WidevineCrypto.tryUsingDecoder = WidevineCrypto.swrap('tryUsingDecoder', 'string', ['string']); 
+
 
 WidevineCrypto.chromeRSAPublicKey = 
 `-----BEGIN PUBLIC KEY-----
@@ -123,88 +162,32 @@ WidevineCrypto.initializeKeys = async function()
 
     this.keysInitialized = true;
 }
-WidevineCrypto.guessKey=async function(encKey)
+WidevineCrypto.tryDecodingKey=async function(encKey)
 {
-    let buf=new Uint8Array(1026);
-    for(let i = 0; i < 1026; i++)
-    {buf[i]=0;}
 
     let hex=bytesToHex(encKey);
-    let res="";
-    console.log(hex);
-    let o=2;
-    while(o<1026)
+    let res=this.tryUsingDecoder(hex);
+    this.log(hex);
+   
+    this.log("Output");
+    this.log(res);
+    if(res.length<10)
     {
-        let bt = Math.floor((o-2)/4);
-        let offs = (o-2)%4;
-        let desired=(encKey[encKey.length-bt-1]>>(offs*2))&3;
-        let destail=hex.substr(hex.length-bt*2,bt*2);
-        let val="";
-        let j=0;
-         for( j= buf[o]; j < 8; j++)
-         {
-             buf[o]=j;
-             let st=bytesToHex(buf);
-             val=await this.guessInput(st);
-             
-             let sub=parseInt(val.substr(val.length-bt*2-2,2),16);
-             let got=(sub>>(offs*2))&3;
-             let gtail=val.substr(hex.length-bt*2,bt*2);
-             if (got===desired && gtail===destail)
-             {
-             if(o%16==2)
-               console.log(val);
-             break;
-             }
-         }
-         if (j == 8)
-        {
-            buf[o] = 0;
-            o--;
-            if (o < 2) 
-            {
-                console.log("Could not match input");
-                throw  "Could not find proper input encoding";
-            }
-            buf[o]++;
-            while (buf[o] == 8)
-            {
-                buf[o] = 0;
-                o--;
-                if (o < 2) 
-                {
-                 console.log("Could not match input");
-                throw  "Could not find proper input encoding";
-                }
-                buf[o]++;
-            }
-            
-        }
-        else
-        o++;
-    
-    };
-    console.log("Output");
-    let st=bytesToHex(buf);
-    let outp=await this.getDeoaep(st);
-    console.log(outp);
-    if(outp.length<10)
-    {
-        throw "Could not remove padding, probably invalid key"
+        throw "Could not remove padding, probably invalid key or decoding failure"
     }
-    console.log(st);
-    return new Uint8Array(hexToBytes(outp));
+    return new Uint8Array(hexToBytes(res));
 }
 
 WidevineCrypto.decryptContentKey = async function(licenseRequest, licenseResponse)
 {
+    await this.initLog();
     licenseRequest = SignedMessage.read(new Pbf(licenseRequest));
     licenseResponse = SignedMessage.read(new Pbf(licenseResponse));
     //console.log("Decrypting?")
     //console.log("Request (from us)")
-    console.log(licenseRequest)
+    this.log(licenseRequest)
     //console.log("Response")
-    console.log(licenseResponse)
+    this.log(licenseResponse)
     if (licenseRequest.type != SignedMessage.MessageType.LICENSE_REQUEST.value) return;
 
     license = License.read(new Pbf(licenseResponse.msg));
@@ -216,10 +199,10 @@ WidevineCrypto.decryptContentKey = async function(licenseRequest, licenseRespons
                                                               licenseRequest.signature, licenseRequest.msg)
     if (!signatureVerified)
     {
-        console.log("Can't verify license request signature; either the platform is wrong or the key has changed!");
+        this.log("Can't verify license request signature; either the platform is wrong or the key has changed!");
         return null;
     }
-    var sessionKey=await this.guessKey(licenseResponse.session_key);
+    var sessionKey=await this.tryDecodingKey(licenseResponse.session_key);
     // decrypt the session key
     // = await crypto.subtle.decrypt({name: "RSA-OAEP"}, this.privateKeyDecrypt, licenseResponse.session_key);
 
@@ -248,7 +231,7 @@ WidevineCrypto.decryptContentKey = async function(licenseRequest, licenseRespons
             CryptoJS.AES.decrypt({ ciphertext: arrayToWordArray(keyData) }, arrayToWordArray(encryptKey), { iv: arrayToWordArray(keyIv) }).words);
 
         contentKeys.push(decryptedKey);
-        console.log("WidevineDecryptor: Found key: " + toHexString(decryptedKey) + " (KID=" + toHexString(keyId) + ")");
+        this.log("WidevineDecryptor: Found key: " + toHexString(decryptedKey) + " (KID=" + toHexString(keyId) + ")");
     }
 
     return contentKeys[0];
